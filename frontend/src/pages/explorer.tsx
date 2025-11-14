@@ -93,7 +93,8 @@ export default function ExplorerPage() {
       }
     } catch (err: any) {
       console.error('Error loading tab data:', err);
-      setError(err.message || 'Erreur lors du chargement des données');
+      // Ne pas afficher d'erreur pour les onglets, juste logger
+      // L'erreur principale sera gérée par loadDataFromBackend
     } finally {
       setLoadingTab(false);
     }
@@ -113,25 +114,119 @@ export default function ExplorerPage() {
     setError(null);
 
     try {
-      // Charger les données depuis le backend
-      const response = await fetch(`http://localhost:8000/api/files/${file_id}/data?limit=10000`);
-
-      if (!response.ok) {
-        throw new Error('Fichier non trouvé');
+      // Charger les données et les statistiques (gérer les erreurs indépendamment)
+      let dataResponse, statsResponse;
+      
+      try {
+        dataResponse = await fetch(`http://localhost:8000/api/files/${file_id}/data?limit=500000`);
+      } catch (fetchError: any) {
+        throw new Error(`Impossible de se connecter au serveur: ${fetchError.message}`);
       }
 
-      const result = await response.json();
+      if (!dataResponse.ok) {
+        const errorData = await dataResponse.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Erreur ${dataResponse.status}: Fichier non trouvé`);
+      }
 
-      if (result.data && result.data.length > 0) {
-        setAllData(result.data);
-        setFilteredData(result.data);
-        computeStatistics(result.data);
+      const dataResult = await dataResponse.json();
+      
+      // Charger les statistiques si disponible (ne pas faire échouer si ça échoue)
+      let backendStats = null;
+      try {
+        statsResponse = await fetch(`http://localhost:8000/api/stats/summary`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_id })
+        });
+        
+        if (statsResponse.ok) {
+          backendStats = await statsResponse.json();
+        } else {
+          console.warn('Stats endpoint returned error:', statsResponse.status);
+        }
+      } catch (statsError: any) {
+        console.warn('Could not load backend stats (non bloquant):', statsError);
+        // On continue sans les stats du backend
+      }
+
+      if (dataResult.data && dataResult.data.length > 0) {
+        setAllData(dataResult.data);
+        setFilteredData(dataResult.data);
+        
+        // Utiliser les statistiques du backend si disponibles, sinon calculer localement
+        if (backendStats && backendStats.success) {
+          // Convertir les statistiques du backend au format attendu par le frontend
+          const summary = backendStats.summary;
+          const total_rows = backendStats.total_rows; // Le vrai total depuis le backend
+          
+          // Extraire les statistiques depuis le summary du backend
+          const numericStats = summary.numeric_stats || {};
+          const categoricalStats = summary.categorical_stats || {};
+          
+          // Statistiques d'âge
+          const edadStats = numericStats.edad || {};
+          const age_stats = {
+            mean: edadStats.mean || 0,
+            std: edadStats.std || 0,
+            min: edadStats.min || 0,
+            max: edadStats.max || 0
+          };
+          
+          // Distribution du sexe
+          const sexoDist = categoricalStats.sexo?.distribution || {};
+          const sex_distribution: { [key: string]: number } = {};
+          Object.entries(sexoDist).forEach(([key, value]) => {
+            sex_distribution[key] = typeof value === 'number' ? value : 0;
+          });
+          
+          // Plage de dates (depuis les données chargées)
+          const dates = dataResult.data
+            .map((row: any) => row.date)
+            .filter((d: any) => d)
+            .map((d: any) => new Date(d))
+            .sort((a: Date, b: Date) => a.getTime() - b.getTime());
+          
+          const date_range = {
+            min: dates.length > 0 ? dates[0].toISOString().split('T')[0] : '',
+            max: dates.length > 0 ? dates[dates.length - 1].toISOString().split('T')[0] : ''
+          };
+          
+          // Unique patients et tests - utiliser les données chargées (échantillon)
+          // Note: Pour les vrais totaux, on devrait faire des requêtes SQL COUNT(DISTINCT ...)
+          // mais pour l'instant on utilise l'échantillon pour l'affichage
+          const unique_patients = new Set(dataResult.data.map((row: any) => row.numorden)).size;
+          const unique_tests = new Set(dataResult.data.map((row: any) => row.nombre)).size;
+          
+          setStats({
+            total_rows, // Le vrai total depuis le backend
+            unique_patients,
+            unique_tests,
+            date_range,
+            age_stats,
+            sex_distribution
+          });
+        } else {
+          // Fallback: calculer localement sur l'échantillon
+          computeStatistics(dataResult.data);
+          // Mais utiliser le total_rows du backend si disponible
+          if (dataResult.total_rows) {
+            setStats(prev => prev ? { ...prev, total_rows: dataResult.total_rows } : null);
+          }
+        }
       } else {
         setError('Aucune donnée disponible');
       }
     } catch (err: any) {
       console.error('Error loading data:', err);
-      setError(err.message || 'Erreur lors du chargement des données');
+      
+      // Gérer spécifiquement les erreurs de réseau
+      if (err.message === 'Failed to fetch' || err.name === 'TypeError' || err.message?.includes('fetch')) {
+        setError('Impossible de se connecter au serveur. Vérifiez que le backend est en cours d\'exécution sur http://localhost:8000');
+      } else if (err.message?.includes('404') || err.message?.includes('non trouvé')) {
+        setError('Fichier non trouvé. Le file_id est peut-être invalide.');
+      } else {
+        setError(err.message || 'Erreur lors du chargement des données');
+      }
     } finally {
       setLoading(false);
     }
@@ -161,28 +256,44 @@ export default function ExplorerPage() {
       max: dates.length > 0 ? dates[dates.length - 1].toISOString().split('T')[0] : ''
     };
 
-    // Age statistics
-    const ages = data
-      .map(row => parseInt(row.edad))
-      .filter(age => !isNaN(age));
-
-    const age_mean = ages.reduce((a, b) => a + b, 0) / ages.length;
-    const age_variance = ages.reduce((sum, age) => sum + Math.pow(age - age_mean, 2), 0) / ages.length;
-    const age_std = Math.sqrt(age_variance);
-
-    const age_stats = {
-      mean: age_mean,
-      std: age_std,
-      min: Math.min(...ages),
-      max: Math.max(...ages)
-    };
-
-    // Sex distribution
+    // Sex distribution (calculé avant pour être disponible dans tous les cas)
     const sex_distribution: { [key: string]: number } = {};
     data.forEach(row => {
       const sex = row.sexo || 'Unknown';
       sex_distribution[sex] = (sex_distribution[sex] || 0) + 1;
     });
+
+    // Age statistics
+    const ages = data
+      .map(row => parseInt(row.edad))
+      .filter(age => !isNaN(age));
+
+    if (ages.length === 0) {
+      setStats({
+        total_rows,
+        unique_patients,
+        unique_tests,
+        date_range,
+        age_stats: { mean: 0, std: 0, min: 0, max: 0 },
+        sex_distribution
+      });
+      return;
+    }
+
+    const age_mean = ages.reduce((a, b) => a + b, 0) / ages.length;
+    const age_variance = ages.reduce((sum, age) => sum + Math.pow(age - age_mean, 2), 0) / ages.length;
+    const age_std = Math.sqrt(age_variance);
+
+    // Utiliser reduce au lieu de Math.min/max pour éviter le stack overflow avec de grands tableaux
+    const age_min = ages.reduce((min, age) => age < min ? age : min, ages[0]);
+    const age_max = ages.reduce((max, age) => age > max ? age : max, ages[0]);
+
+    const age_stats = {
+      mean: age_mean,
+      std: age_std,
+      min: age_min,
+      max: age_max
+    };
 
     setStats({
       total_rows,
@@ -740,6 +851,11 @@ export default function ExplorerPage() {
                     <Hash className="w-8 h-8 text-cyan-500 mb-2" />
                     <p className="text-3xl font-bold text-gray-800">{stats.total_rows.toLocaleString()}</p>
                     <p className="text-sm text-gray-600">Total de Résultats</p>
+                    {allData.length < stats.total_rows && (
+                      <p className="text-xs text-gray-400 mt-1">
+                        ({allData.length.toLocaleString()} affichées)
+                      </p>
+                    )}
                   </div>
 
                   <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-blue-500">
@@ -869,9 +985,16 @@ export default function ExplorerPage() {
                 {/* Pagination */}
                 {totalPages > 1 && (
                   <div className="p-4 bg-gray-50 border-t border-gray-200 flex items-center justify-between">
-                    <p className="text-sm text-gray-600">
-                      Affichage de {indexOfFirstItem + 1} à {Math.min(indexOfLastItem, filteredData.length)} sur {filteredData.length.toLocaleString()} résultats
-                    </p>
+                    <div>
+                      <p className="text-sm text-gray-600">
+                        Affichage de {indexOfFirstItem + 1} à {Math.min(indexOfLastItem, filteredData.length)} sur {filteredData.length.toLocaleString()} résultats
+                      </p>
+                      {stats && stats.total_rows > filteredData.length && filters.length === 0 && filterMode === 'manual' && !sqlQuery.trim() && (
+                        <p className="text-xs text-gray-400 mt-1">
+                          Total réel: {stats.total_rows.toLocaleString()} lignes (échantillon de {filteredData.length.toLocaleString()} chargées)
+                        </p>
+                      )}
+                    </div>
                     <div className="flex space-x-2">
                       <button
                         onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
