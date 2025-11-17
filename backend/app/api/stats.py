@@ -1,10 +1,10 @@
 # backend/app/api/stats.py
 from fastapi import APIRouter, HTTPException, Depends
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
-from sqlmodel import Session, select
+from sqlmodel import Session, select, and_
 
 from ..db.base import get_session
 from ..db.models import Result, File
@@ -212,6 +212,176 @@ async def get_missing_summary(file_id: str, session: Session = Depends(get_sessi
             "missing_summary": missing_stats
         }
         
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/stats/{file_id}/timeseries")
+async def get_timeseries_data(
+    file_id: str,
+    column: str = "nombre",  # Colonne à agréger (par défaut: nombre de tests)
+    group_by: str = "day",  # day, week, month
+    filters: Optional[str] = None,  # JSON string of filters
+    session: Session = Depends(get_session)
+):
+    """
+    Obtenir des données formatées pour séries temporelles
+    
+    Args:
+        file_id: ID du fichier
+        column: Colonne à agréger ('nombre', 'numorden', etc.)
+        group_by: Période de groupement ('day', 'week', 'month')
+        filters: JSON string représentant une liste de FilterCondition (optionnel)
+    
+    Returns:
+        Données formatées pour graphique de série temporelle
+    """
+    try:
+        import json
+        
+        # Vérifier que le fichier existe
+        file_stmt = select(File).where(File.file_id == file_id)
+        file_record = session.exec(file_stmt).first()
+        if not file_record:
+            raise HTTPException(status_code=404, detail="Fichier non trouvé")
+        
+        # Construire la requête de base
+        results_stmt = select(Result).where(Result.file_id == file_id)
+        
+        # Appliquer les filtres si fournis
+        if filters:
+            try:
+                filter_list = json.loads(filters)
+                filter_conditions = []
+                
+                for filter_cond in filter_list:
+                    if not filter_cond.get('value'):
+                        continue
+                    
+                    column_name = filter_cond['column']
+                    operator = filter_cond['operator']
+                    value = filter_cond['value']
+                    
+                    column_attr = getattr(Result, column_name, None)
+                    if column_attr is None:
+                        continue
+                    
+                    # Construire la condition selon l'opérateur (même logique que subset_manual)
+                    if operator == 'LIKE':
+                        filter_conditions.append(column_attr.like(f"%{value}%"))
+                    elif operator == 'IN':
+                        values_list = [v.strip() for v in value.split(',')]
+                        filter_conditions.append(column_attr.in_(values_list))
+                    elif operator == '=':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr == int(value))
+                        else:
+                            filter_conditions.append(column_attr == value)
+                    elif operator == '!=':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr != int(value))
+                        else:
+                            filter_conditions.append(column_attr != value)
+                    elif operator == '>':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr > int(value))
+                        else:
+                            filter_conditions.append(column_attr > value)
+                    elif operator == '<':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr < int(value))
+                        else:
+                            filter_conditions.append(column_attr < value)
+                    elif operator == '>=':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr >= int(value))
+                        else:
+                            filter_conditions.append(column_attr >= value)
+                    elif operator == '<=':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr <= int(value))
+                        else:
+                            filter_conditions.append(column_attr <= value)
+                
+                if filter_conditions:
+                    results_stmt = results_stmt.where(and_(*filter_conditions))
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Format de filtres invalide (JSON attendu)")
+        
+        # Exécuter la requête
+        results = session.exec(results_stmt).all()
+        
+        if not results:
+            raise HTTPException(status_code=404, detail="Aucune donnée trouvée")
+        
+        # Convertir en DataFrame
+        data_list = []
+        for result in results:
+            data_list.append({
+                "date": result.date.isoformat() if result.date else None,
+                "nombre": result.nombre,
+                "numorden": result.numorden,
+                "edad": result.edad,
+                "sexo": result.sexo
+            })
+        df = pd.DataFrame(data_list)
+        
+        # Filtrer les dates valides
+        df = df[df['date'].notna()]
+        if len(df) == 0:
+            raise HTTPException(status_code=404, detail="Aucune date valide trouvée")
+        
+        # Convertir en datetime
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Grouper selon la période demandée
+        if group_by == "day":
+            df['period'] = df['date'].dt.date
+            period_format = "%Y-%m-%d"
+        elif group_by == "week":
+            df['period'] = df['date'].dt.to_period('W').dt.start_time.dt.date
+            period_format = "%Y-%m-%d"
+        elif group_by == "month":
+            df['period'] = df['date'].dt.to_period('M').dt.start_time.dt.date
+            period_format = "%Y-%m"
+        else:
+            raise HTTPException(status_code=400, detail="group_by doit être 'day', 'week' ou 'month'")
+        
+        # Agréger selon la colonne demandée
+        if column == "nombre":
+            # Nombre de tests par période
+            timeseries = df.groupby('period').size().reset_index(name='count')
+            timeseries['period'] = timeseries['period'].astype(str)
+        elif column == "numorden":
+            # Nombre de patients uniques par période
+            timeseries = df.groupby('period')['numorden'].nunique().reset_index(name='count')
+            timeseries['period'] = timeseries['period'].astype(str)
+        elif column == "edad":
+            # Moyenne d'âge par période
+            timeseries = df.groupby('period')['edad'].mean().reset_index(name='count')
+            timeseries['period'] = timeseries['period'].astype(str)
+        else:
+            # Compter les occurrences de la colonne
+            timeseries = df.groupby(['period', column]).size().reset_index(name='count')
+            timeseries = timeseries.groupby('period')['count'].sum().reset_index(name='count')
+            timeseries['period'] = timeseries['period'].astype(str)
+        
+        # Trier par période
+        timeseries = timeseries.sort_values('period')
+        
+        return {
+            "success": True,
+            "file_id": file_id,
+            "column": column,
+            "group_by": group_by,
+            "data": {
+                "x": timeseries['period'].tolist(),
+                "y": timeseries['count'].tolist()
+            }
+        }
+        
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

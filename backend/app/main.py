@@ -102,6 +102,7 @@ async def root():
             "subset_manual": "POST /api/subset/manual",
             "subset_sql": "POST /api/subset/sql",
             "preview_sql": "POST /api/subset/preview",
+            "export_data": "GET /api/subset/export?file_id={file_id}&format=csv|xlsx&filters={json}",
             
             # Statistics
             "stats_summary": "POST /api/stats/summary",

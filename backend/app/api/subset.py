@@ -1,10 +1,11 @@
 # backend/app/api/subset.py
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import pandas as pd
 import re
+import io
 from sqlmodel import Session, select, or_, and_, text
 from sqlalchemy import text as sql_text
 
@@ -397,9 +398,189 @@ async def preview_sql_query(request: SQLFilterRequest, session: Session = Depend
         }
         
     except Exception as e:
-        return {
-            "valid": False,
-            "issues": [str(e)],
-            "estimated_rows": None,
-            "query": request.query
-        }
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la prévisualisation: {str(e)}")
+
+@router.get("/subset/export")
+async def export_filtered_data(
+    file_id: str,
+    format: str = Query("csv", regex="^(csv|xlsx)$"),
+    filters: Optional[str] = None,  # JSON string of filters
+    sql_query: Optional[str] = None,  # SQL query string (alternative to filters)
+    session: Session = Depends(get_session)
+):
+    """
+    Exporter les données filtrées en CSV ou Excel
+    
+    Args:
+        file_id: ID du fichier
+        format: Format d'export ('csv' ou 'xlsx')
+        filters: JSON string représentant une liste de FilterCondition (optionnel)
+        sql_query: Requête SQL personnalisée (optionnel, alternative à filters)
+    """
+    try:
+        import json
+        
+        # Vérifier que le fichier existe
+        file_stmt = select(File).where(File.file_id == file_id)
+        file_record = session.exec(file_stmt).first()
+        if not file_record:
+            raise HTTPException(status_code=404, detail="Fichier non trouvé")
+        
+        # Si une requête SQL est fournie, l'utiliser
+        if sql_query:
+            # Validation de sécurité (même logique que subset_sql)
+            query_lower = sql_query.lower().strip()
+            
+            # Vérifier les mots-clés dangereux
+            dangerous_keywords = ['insert', 'update', 'delete', 'drop', 'create', 'alter', 'truncate']
+            for keyword in dangerous_keywords:
+                if keyword in query_lower:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Opération non autorisée: '{keyword}' détecté dans la requête SQL"
+                    )
+            
+            # Normaliser la requête SQL
+            normalized_query = re.sub(r'==', '=', sql_query.strip())
+            normalized_query = re.sub(r'"([^"]*)"', r"'\1'", normalized_query)
+            
+            # Ajouter une limite de sécurité si absente
+            if 'limit' not in query_lower:
+                normalized_query = f"{normalized_query.rstrip(';')} LIMIT 100000"
+            
+            # Exécuter la requête SQL
+            try:
+                # Utiliser sqlalchemy.text pour exécuter la requête
+                result_proxy = session.execute(sql_text(normalized_query))
+                rows = result_proxy.fetchall()
+                
+                if not rows:
+                    raise HTTPException(status_code=404, detail="Aucune donnée trouvée avec cette requête SQL")
+                
+                # Convertir les résultats en DataFrame
+                columns = result_proxy.keys()
+                data_list = [dict(zip(columns, row)) for row in rows]
+                df = pd.DataFrame(data_list)
+                
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Erreur SQL: {str(e)}")
+        
+        else:
+            # Utiliser les filtres manuels (logique existante)
+            query = select(Result).where(Result.file_id == file_id)
+            
+            # Appliquer les filtres si fournis
+            if filters:
+                try:
+                    filter_list = json.loads(filters)
+                    filter_conditions = []
+                    
+                    for filter_cond in filter_list:
+                        if not filter_cond.get('value'):
+                            continue
+                        
+                        column_name = filter_cond['column']
+                        operator = filter_cond['operator']
+                        value = filter_cond['value']
+                        
+                        column_attr = getattr(Result, column_name, None)
+                        if column_attr is None:
+                            continue
+                        
+                        # Construire la condition selon l'opérateur
+                        if operator == 'LIKE':
+                            filter_conditions.append(column_attr.like(f"%{value}%"))
+                        elif operator == 'IN':
+                            values_list = [v.strip() for v in value.split(',')]
+                            filter_conditions.append(column_attr.in_(values_list))
+                        elif operator == '=':
+                            if column_name == 'edad':
+                                filter_conditions.append(column_attr == int(value))
+                            else:
+                                filter_conditions.append(column_attr == value)
+                        elif operator == '!=':
+                            if column_name == 'edad':
+                                filter_conditions.append(column_attr != int(value))
+                            else:
+                                filter_conditions.append(column_attr != value)
+                        elif operator == '>':
+                            if column_name == 'edad':
+                                filter_conditions.append(column_attr > int(value))
+                            else:
+                                filter_conditions.append(column_attr > value)
+                        elif operator == '<':
+                            if column_name == 'edad':
+                                filter_conditions.append(column_attr < int(value))
+                            else:
+                                filter_conditions.append(column_attr < value)
+                        elif operator == '>=':
+                            if column_name == 'edad':
+                                filter_conditions.append(column_attr >= int(value))
+                            else:
+                                filter_conditions.append(column_attr >= value)
+                        elif operator == '<=':
+                            if column_name == 'edad':
+                                filter_conditions.append(column_attr <= int(value))
+                            else:
+                                filter_conditions.append(column_attr <= value)
+                    
+                    if filter_conditions:
+                        query = query.where(and_(*filter_conditions))
+                except json.JSONDecodeError:
+                    raise HTTPException(status_code=400, detail="Format de filtres invalide (JSON attendu)")
+            
+            # Exécuter la requête
+            results = session.exec(query).all()
+            
+            if not results:
+                raise HTTPException(status_code=404, detail="Aucune donnée trouvée avec ces filtres")
+            
+            # Convertir en DataFrame
+            data_list = []
+            for result in results:
+                data_list.append({
+                    "numorden": result.numorden or '',
+                    "sexo": result.sexo or '',
+                    "edad": result.edad if result.edad is not None else 0,
+                    "nombre": result.nombre or '',
+                    "textores": result.textores or '',
+                    "nombre2": result.nombre2 or '',
+                    "Date": result.date.isoformat() if result.date else ''
+                })
+            
+            df = pd.DataFrame(data_list)
+        
+        # Générer le fichier selon le format
+        if format == 'csv':
+            # CSV
+            output = io.StringIO()
+            df.to_csv(output, index=False, encoding='utf-8-sig')  # BOM pour Excel
+            output.seek(0)
+            
+            return StreamingResponse(
+                io.BytesIO(output.getvalue().encode('utf-8-sig')),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f"attachment; filename=lablens_export_{file_id}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                }
+            )
+        
+        elif format == 'xlsx':
+            # Excel
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Donnees')
+            output.seek(0)
+            
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={
+                    "Content-Disposition": f"attachment; filename=lablens_export_{file_id}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                }
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'export: {str(e)}")

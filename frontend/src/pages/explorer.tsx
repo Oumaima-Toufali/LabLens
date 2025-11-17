@@ -5,14 +5,27 @@ import {
   Activity, Filter, Database, BarChart3, TrendingUp, Users,
   Plus, X, Play, Download, Save, Share2, Eye, EyeOff,
   Calendar, Hash, User, TestTube, FileText, Loader2, AlertCircle, MessageSquare,
-  Layers, Repeat, Network
+  Layers, Repeat, Network, Bookmark, BookmarkCheck, Copy, Trash2
 } from 'lucide-react';
+import DistributionChart from '@/components/Charts/DistributionChart';
+import HeatmapChart from '@/components/Charts/HeatmapChart';
+import TimeTrendChart from '@/components/Charts/TimeTrendChart';
 
 interface FilterCondition {
   id: string;
   column: string;
   operator: string;
   value: string;
+}
+
+interface SavedView {
+  view_id: string;
+  name: string;
+  file_id: string;
+  filters: { column: string; operator: string; value: string }[];
+  description?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 interface StatsSummary {
@@ -26,7 +39,7 @@ interface StatsSummary {
 
 export default function ExplorerPage() {
   const router = useRouter();
-  const { file_id } = router.query;
+  const { file_id, view_id } = router.query;
 
   const [hoveredNav, setHoveredNav] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<'manual' | 'sql'>('manual');
@@ -50,7 +63,22 @@ export default function ExplorerPage() {
   const [panelsData, setPanelsData] = useState<any>(null);
   const [repeatsData, setRepeatsData] = useState<any>(null);
   const [coorderData, setCoorderData] = useState<any>(null);
+  const [coorderMatrix, setCoorderMatrix] = useState<any>(null);
   const [loadingTab, setLoadingTab] = useState(false);
+  
+  // Data for visualizations
+  const [timeseriesData, setTimeseriesData] = useState<{x: string[], y: number[]} | null>(null);
+  const [loadingVisualizations, setLoadingVisualizations] = useState(false);
+
+  // States for saved views
+  const [savedViews, setSavedViews] = useState<SavedView[]>([]);
+  const [loadingViews, setLoadingViews] = useState(false);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [viewName, setViewName] = useState('');
+  const [viewDescription, setViewDescription] = useState('');
+  const [savingView, setSavingView] = useState(false);
+  const [showViewsList, setShowViewsList] = useState(false);
+  const [copiedLink, setCopiedLink] = useState<string | null>(null);
 
   const COLUMNS = ['numorden', 'sexo', 'edad', 'nombre', 'textores', 'nombre2', 'Date'];
   const OPERATORS = ['=', '!=', '>', '<', '>=', '<=', 'LIKE', 'IN'];
@@ -66,6 +94,350 @@ export default function ExplorerPage() {
       loadTabData();
     }
   }, [file_id, activeTab]);
+
+  useEffect(() => {
+    if (file_id) {
+      loadVisualizationData();
+    }
+  }, [file_id, filters, filterMode, activeTab]);
+
+  // Charger une vue sauvegardée depuis l'URL (partage)
+  useEffect(() => {
+    if (view_id && typeof view_id === 'string' && !loading && file_id) {
+      loadViewFromId(view_id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view_id, file_id]);
+
+  // Charger les vues sauvegardées
+  useEffect(() => {
+    if (file_id) {
+      loadSavedViews();
+    }
+  }, [file_id]);
+
+  const loadVisualizationData = async () => {
+    if (!file_id) return;
+    
+    setLoadingVisualizations(true);
+    try {
+      // Préparer les filtres pour l'API
+      const filtersToSend = filterMode === 'manual' 
+        ? filters.filter(f => f.value)
+        : [];
+      
+      const filtersParam = filtersToSend.length > 0 
+        ? `&filters=${encodeURIComponent(JSON.stringify(filtersToSend))}`
+        : '';
+      
+      // Charger les données de série temporelle avec filtres
+      const timeseriesResponse = await fetch(`http://localhost:8000/api/stats/${file_id}/timeseries?column=nombre&group_by=day${filtersParam}`);
+      if (timeseriesResponse.ok) {
+        const timeseriesResult = await timeseriesResponse.json();
+        if (timeseriesResult.success && timeseriesResult.data) {
+          setTimeseriesData(timeseriesResult.data);
+        }
+      }
+      
+      // Charger la matrice de co-occurrence avec filtres si on est dans l'onglet coorder
+      if (activeTab === 'coorder') {
+        const matrixResponse = await fetch(`http://localhost:8000/api/coorder/${file_id}/matrix${filtersParam ? '?' + filtersParam.substring(1) : ''}`);
+        if (matrixResponse.ok) {
+          const matrixData = await matrixResponse.json();
+          setCoorderMatrix(matrixData);
+        }
+      }
+    } catch (err: any) {
+      console.error('Error loading visualization data:', err);
+    } finally {
+      setLoadingVisualizations(false);
+    }
+  };
+
+  // Charger une vue sauvegardée depuis l'URL (partage)
+  const loadViewFromId = async (viewId: string) => {
+    try {
+      setLoading(true);
+      const response = await fetch(`http://localhost:8000/api/views/${viewId}`);
+      if (!response.ok) {
+        throw new Error('Vue non trouvée');
+      }
+      const data = await response.json();
+      if (data.success && data.view) {
+        const view = data.view;
+        
+        // Naviguer vers le bon file_id si nécessaire
+        if (view.file_id !== file_id) {
+          router.push(`/explorer?file_id=${view.file_id}&view_id=${viewId}`);
+          return;
+        }
+        
+        // Convertir les filtres au format FilterCondition
+        const loadedFilters: FilterCondition[] = view.filters.map((f: any, idx: number) => ({
+          id: `loaded-${idx}-${Date.now()}`,
+          column: f.column,
+          operator: f.operator,
+          value: f.value
+        }));
+        
+        // Appliquer les filtres
+        setFilters(loadedFilters);
+        setFilterMode('manual');
+        
+        // Recharger les données avec les filtres
+        await loadDataFromBackend();
+      }
+    } catch (err: any) {
+      setError(`Erreur lors du chargement de la vue : ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Charger la liste des vues sauvegardées
+  const loadSavedViews = async () => {
+    if (!file_id) return;
+    
+    setLoadingViews(true);
+    try {
+      const response = await fetch(`http://localhost:8000/api/views?file_id=${file_id}`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          const sanitizedViews: SavedView[] = (data.views || []).map((view: any) => ({
+            view_id: view.view_id,
+            name: view.name,
+            file_id: view.file_id,
+            filters: Array.isArray(view.filters) ? view.filters : [],
+            description: view.description ?? null,
+            created_at: view.created_at ?? null,
+            updated_at: view.updated_at ?? null
+          }));
+          setSavedViews(sanitizedViews);
+        }
+      }
+    } catch (err: any) {
+      console.error('Error loading views:', err);
+    } finally {
+      setLoadingViews(false);
+    }
+  };
+
+  // Sauvegarder la vue actuelle
+  const saveCurrentView = async () => {
+    if (!file_id || !viewName.trim()) {
+      setError('Veuillez entrer un nom pour la vue');
+      return;
+    }
+    
+    // Préparer les filtres à sauvegarder (uniquement ceux avec une valeur)
+    const filtersToSave = filters.filter(f => f.value.trim());
+    
+    if (filtersToSave.length === 0) {
+      setError('Aucun filtre à sauvegarder');
+      return;
+    }
+    
+    setSavingView(true);
+    try {
+      const response = await fetch('http://localhost:8000/api/views', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: viewName.trim(),
+          file_id: file_id,
+          filters: filtersToSave.map(f => ({
+            column: f.column,
+            operator: f.operator,
+            value: f.value
+          })),
+          description: viewDescription.trim() || null
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Erreur lors de la sauvegarde');
+      }
+      
+      const data = await response.json();
+      if (data.success) {
+        // Réinitialiser le formulaire
+        setViewName('');
+        setViewDescription('');
+        setShowSaveModal(false);
+        
+        // Recharger la liste des vues
+        await loadSavedViews();
+        
+        // Afficher un message de succès
+        alert('Vue sauvegardée avec succès !');
+      }
+    } catch (err: any) {
+      setError(`Erreur lors de la sauvegarde : ${err.message}`);
+    } finally {
+      setSavingView(false);
+    }
+  };
+
+  // Charger une vue sauvegardée
+  const loadSavedView = async (viewId: string) => {
+    try {
+      setLoading(true);
+      setError(null);
+      console.log('Chargement de la vue:', viewId);
+      
+      const response = await fetch(`http://localhost:8000/api/views/${viewId}`);
+      console.log('Réponse du serveur:', response.status, response.statusText);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Erreur inconnue' }));
+        throw new Error(errorData.detail || `Erreur ${response.status}: ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      console.log('Données reçues:', data);
+      
+      if (data.success && data.view) {
+        const view: SavedView = {
+          view_id: data.view.view_id,
+          name: data.view.name,
+          file_id: data.view.file_id,
+          filters: Array.isArray(data.view.filters) ? data.view.filters : [],
+          description: data.view.description ?? null,
+          created_at: data.view.created_at ?? null,
+          updated_at: data.view.updated_at ?? null
+        };
+        
+        if (view.filters.length === 0) {
+          throw new Error('Les filtres de la vue sont vides ou invalides');
+        }
+        
+        // Naviguer automatiquement vers le bon fichier si besoin
+        if (view.file_id !== file_id) {
+          console.log('Changement de fichier nécessaire, redirection...');
+          await router.push({
+            pathname: '/explorer',
+            query: { file_id: view.file_id, view_id: viewId }
+          });
+          setShowViewsList(false);
+          return;
+        }
+        
+        // Convertir les filtres
+        const loadedFilters: FilterCondition[] = view.filters.map((f, idx: number) => ({
+          id: `loaded-${idx}-${Date.now()}`,
+          column: f.column || '',
+          operator: f.operator || '=',
+          value: f.value || ''
+        }));
+        
+        console.log('Filtres chargés:', loadedFilters);
+        
+        // Appliquer les filtres
+        setFilters(loadedFilters);
+        setFilterMode('manual');
+        
+        // Mettre à jour l'URL pour refléter la vue active
+        router.replace({
+          pathname: '/explorer',
+          query: { ...router.query, file_id: view.file_id, view_id: viewId }
+        }, undefined, { shallow: true });
+        
+        // Recharger les données
+        await loadDataFromBackend();
+        
+        // Fermer la liste des vues
+        setShowViewsList(false);
+        
+        console.log('Vue chargée avec succès');
+      } else {
+        throw new Error('Format de réponse invalide');
+      }
+    } catch (err: any) {
+      console.error('Erreur lors du chargement de la vue:', err);
+      setError(`Erreur lors du chargement : ${err.message}`);
+      alert(`Erreur lors du chargement de la vue : ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Supprimer une vue
+  const deleteView = async (viewId: string) => {
+    if (!confirm('Êtes-vous sûr de vouloir supprimer cette vue ?')) {
+      return;
+    }
+    
+    try {
+      setError(null);
+      console.log('Suppression de la vue:', viewId);
+      
+      const response = await fetch(`http://localhost:8000/api/views/${viewId}`, {
+        method: 'DELETE'
+      });
+      
+      console.log('Réponse suppression:', response.status, response.statusText);
+      
+      if (response.ok) {
+        const data = await response.json().catch(() => ({}));
+        console.log('Vue supprimée:', data);
+        
+        // Recharger la liste
+        await loadSavedViews();
+        
+        alert('Vue supprimée avec succès');
+      } else {
+        const errorData = await response.json().catch(() => ({ detail: 'Erreur inconnue' }));
+        throw new Error(errorData.detail || `Erreur ${response.status}: ${response.statusText}`);
+      }
+    } catch (err: any) {
+      console.error('Erreur lors de la suppression:', err);
+      setError(`Erreur lors de la suppression : ${err.message}`);
+      alert(`Erreur lors de la suppression : ${err.message}`);
+    }
+  };
+
+  // Partager une vue (copier le lien)
+  const shareView = async (viewId: string) => {
+    try {
+      setError(null);
+      console.log('Partage de la vue:', viewId);
+      
+      const response = await fetch(`http://localhost:8000/api/views/${viewId}/share`);
+      console.log('Réponse partage:', response.status, response.statusText);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Erreur inconnue' }));
+        throw new Error(errorData.detail || `Erreur ${response.status}: ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      console.log('Données de partage:', data);
+      
+      if (data.success && data.share_link) {
+        // Copier dans le presse-papier
+        try {
+          await navigator.clipboard.writeText(data.share_link);
+          setCopiedLink(viewId);
+          
+          // Réinitialiser après 2 secondes
+          setTimeout(() => setCopiedLink(null), 2000);
+          
+          alert(`Lien copié dans le presse-papier !\n${data.share_link}`);
+        } catch (clipboardError: any) {
+          // Si la copie échoue, afficher le lien
+          alert(`Lien de partage :\n${data.share_link}`);
+        }
+      } else {
+        throw new Error('Format de réponse invalide');
+      }
+    } catch (err: any) {
+      console.error('Erreur lors du partage:', err);
+      setError(`Erreur lors du partage : ${err.message}`);
+      alert(`Erreur lors du partage : ${err.message}`);
+    }
+  };
 
   const loadTabData = async () => {
     if (!file_id) return;
@@ -89,6 +461,18 @@ export default function ExplorerPage() {
         if (response.ok) {
           const data = await response.json();
           setCoorderData(data);
+        }
+        // Charger aussi la matrice pour la heatmap avec filtres
+        const filtersToSend = filterMode === 'manual' 
+          ? filters.filter(f => f.value)
+          : [];
+        const filtersParam = filtersToSend.length > 0 
+          ? `?filters=${encodeURIComponent(JSON.stringify(filtersToSend))}`
+          : '';
+        const matrixResponse = await fetch(`http://localhost:8000/api/coorder/${file_id}/matrix${filtersParam}`);
+        if (matrixResponse.ok) {
+          const matrixData = await matrixResponse.json();
+          setCoorderMatrix(matrixData);
         }
       }
     } catch (err: any) {
@@ -471,31 +855,69 @@ export default function ExplorerPage() {
     }
   };
 
-  const exportData = (format: 'csv' | 'xlsx') => {
-    // Simple CSV export
-    if (format === 'csv') {
-      const headers = COLUMNS.join(',');
-      const rows = filteredData.map(row =>
-        COLUMNS.map(col => {
-          const value = row[col];
-          return typeof value === 'string' && value.includes(',')
-            ? `"${value}"`
-            : value || '';
-        }).join(',')
-      ).join('\n');
+  const exportData = async (format: 'csv' | 'xlsx') => {
+    if (!file_id) {
+      alert('Aucun fichier sélectionné');
+      return;
+    }
 
-      const csv = `${headers}\n${rows}`;
-      const blob = new Blob([csv], { type: 'text/csv' });
+    try {
+      // Construire l'URL avec les paramètres
+      const params = new URLSearchParams({
+        file_id: file_id as string,
+        format: format === 'xlsx' ? 'xlsx' : 'csv'
+      });
+
+      // Préparer les filtres ou la requête SQL selon le mode
+      if (filterMode === 'sql') {
+        if (!sqlQuery.trim()) {
+          alert('Veuillez entrer une requête SQL pour exporter les données');
+          return;
+        }
+        // Ajouter la requête SQL
+        params.append('sql_query', sqlQuery.trim());
+      } else {
+        // Mode manuel : ajouter les filtres si présents
+        const filtersToExport = filters.filter(f => f.value);
+        if (filtersToExport.length > 0) {
+          params.append('filters', JSON.stringify(filtersToExport));
+        }
+      }
+
+      // Appeler l'endpoint d'export
+      const response = await fetch(`http://localhost:8000/api/subset/export?${params.toString()}`);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Erreur lors de l\'export' }));
+        throw new Error(errorData.detail || `Erreur ${response.status}`);
+      }
+
+      // Télécharger le fichier
+      const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `lablens_export_${new Date().toISOString().split('T')[0]}.csv`;
+      
+      // Extraire le nom de fichier depuis les headers ou utiliser un nom par défaut
+      const contentDisposition = response.headers.get('Content-Disposition');
+      let filename = `lablens_export_${file_id}_${new Date().toISOString().split('T')[0]}.${format === 'xlsx' ? 'xlsx' : 'csv'}`;
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+      }
+      
+      a.download = filename;
       a.click();
       window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      console.error('Error exporting data:', err);
+      alert(`Erreur lors de l'export: ${err.message}`);
     }
   };
 
-  // Pagination
+  // Calculer les données paginées
   const indexOfLastItem = currentPage * itemsPerPage;
   const indexOfFirstItem = indexOfLastItem - itemsPerPage;
   const currentData = filteredData.slice(indexOfFirstItem, indexOfLastItem);
@@ -504,7 +926,7 @@ export default function ExplorerPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-cyan-50">
       {/* Header */}
-      <header className="border-b border-gray-100 bg-white sticky top-0 z-50 shadow-sm">
+      <header className="bg-white shadow-md mb-8">
         <div className="max-w-7xl mx-auto px-6 py-4">
           <div className="flex items-center justify-between">
             <Link href="/" className="flex items-center space-x-3">
@@ -621,6 +1043,28 @@ export default function ExplorerPage() {
                     SQL
                   </button>
                 </div>
+
+                {/* Boutons Sauvegarder et Liste des vues */}
+                {filterMode === 'manual' && (
+                  <div className="flex flex-col gap-2 mb-6">
+                    <button
+                      onClick={() => setShowSaveModal(true)}
+                      disabled={filters.filter(f => f.value).length === 0}
+                      className="flex items-center justify-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+                    >
+                      <Save className="w-4 h-4" />
+                      <span>Sauvegarder la vue</span>
+                    </button>
+                    
+                    <button
+                      onClick={() => setShowViewsList(!showViewsList)}
+                      className="flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors text-sm font-medium"
+                    >
+                      <Bookmark className="w-4 h-4" />
+                      <span>Mes vues ({savedViews.length})</span>
+                    </button>
+                  </div>
+                )}
 
                 {/* Manual Filters */}
                 {filterMode === 'manual' && (
@@ -782,11 +1226,18 @@ export default function ExplorerPage() {
                 {/* Action Buttons */}
                 <div className="space-y-2">
                   <button
-                    onClick={exportData.bind(null, 'csv')}
+                    onClick={() => exportData('csv')}
                     className="w-full py-2 border-2 border-cyan-500 text-cyan-600 font-medium rounded-lg hover:bg-cyan-50 transition-colors flex items-center justify-center space-x-2"
                   >
                     <Download className="w-4 h-4" />
                     <span>Exporter CSV</span>
+                  </button>
+                  <button
+                    onClick={() => exportData('xlsx')}
+                    className="w-full py-2 border-2 border-blue-500 text-blue-600 font-medium rounded-lg hover:bg-blue-50 transition-colors flex items-center justify-center space-x-2"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Exporter Excel</span>
                   </button>
                 </div>
 
@@ -929,6 +1380,53 @@ export default function ExplorerPage() {
                           {stats.age_stats.min} - {stats.age_stats.max} ans
                         </span>
                       </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Visualizations */}
+              {stats && (
+                <div className="grid md:grid-cols-2 gap-6">
+                  {/* Distribution d'âge - Histogramme */}
+                  <div className="bg-white rounded-xl shadow-xl p-6">
+                    <h3 className="text-lg font-bold mb-4 text-gray-800">Distribution d'Âge</h3>
+                    <div className="h-64">
+                      <DistributionChart
+                        data={filteredData.map(row => row.edad).filter(edad => edad != null && !isNaN(edad))}
+                        title=""
+                        xLabel="Âge (ans)"
+                        yLabel="Fréquence"
+                        bins={20}
+                        color="#06b6d4"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Série temporelle */}
+                  <div className="bg-white rounded-xl shadow-xl p-6">
+                    <h3 className="text-lg font-bold mb-4 text-gray-800">Évolution des Tests dans le Temps</h3>
+                    <div className="h-64">
+                      {loadingVisualizations ? (
+                        <div className="flex items-center justify-center h-full">
+                          <Loader2 className="w-8 h-8 text-cyan-500 animate-spin" />
+                        </div>
+                      ) : timeseriesData ? (
+                        <TimeTrendChart
+                          x={timeseriesData.x}
+                          y={timeseriesData.y}
+                          title=""
+                          xLabel="Date"
+                          yLabel="Nombre de tests"
+                          color="#06b6d4"
+                          mode="lines+markers"
+                          seriesName="Tests"
+                        />
+                      ) : (
+                        <div className="flex items-center justify-center h-full text-gray-500">
+                          Aucune donnée temporelle disponible
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1269,6 +1767,24 @@ export default function ExplorerPage() {
                         </div>
                       </div>
 
+                      {/* Heatmap de co-occurrence */}
+                      {coorderMatrix?.success && coorderMatrix?.matrix && (
+                        <div className="bg-white rounded-xl shadow-xl p-6">
+                          <h3 className="text-xl font-bold mb-4 text-gray-800">Matrice de Co-occurrence</h3>
+                          <div className="h-96">
+                            <HeatmapChart
+                              data={coorderMatrix.matrix}
+                              xLabels={coorderMatrix.test_names}
+                              yLabels={coorderMatrix.test_names}
+                              title=""
+                              xLabel="Test 1"
+                              yLabel="Test 2"
+                              colorscale="Blues"
+                            />
+                          </div>
+                        </div>
+                      )}
+
                       {coorderData.by_service && coorderData.by_service.length > 0 && (
                         <div className="bg-white rounded-xl shadow-xl p-6">
                           <h3 className="text-xl font-bold mb-4 text-gray-800">Analyse par Service</h3>
@@ -1331,44 +1847,186 @@ export default function ExplorerPage() {
         </div>
       )}
       </div>
+
+      {/* Modal de sauvegarde */}
+      {showSaveModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md">
+            <h3 className="text-xl font-bold mb-4">Sauvegarder la vue</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-1">Nom de la vue *</label>
+                <input
+                  type="text"
+                  value={viewName}
+                  onChange={(e) => setViewName(e.target.value)}
+                  placeholder="Ex: Femmes > 40 ans"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium mb-1">Description (optionnel)</label>
+                <textarea
+                  value={viewDescription}
+                  onChange={(e) => setViewDescription(e.target.value)}
+                  placeholder="Description de cette cohorte..."
+                  rows={3}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              
+              <div className="text-sm text-gray-600">
+                <p>Filtres à sauvegarder : {filters.filter(f => f.value).length}</p>
+              </div>
+            </div>
+            
+            <div className="flex gap-2 mt-6">
+              <button
+                onClick={saveCurrentView}
+                disabled={savingView || !viewName.trim()}
+                className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {savingView ? 'Sauvegarde...' : 'Sauvegarder'}
+              </button>
+              <button
+                onClick={() => {
+                  setShowSaveModal(false);
+                  setViewName('');
+                  setViewDescription('');
+                }}
+                className="flex-1 px-4 py-2 bg-gray-300 hover:bg-gray-400 text-gray-800 rounded-lg"
+              >
+                Annuler
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Liste des vues sauvegardées */}
+      {showViewsList && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-2xl max-h-[80vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold">Mes vues sauvegardées</h3>
+              <button
+                onClick={() => setShowViewsList(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            {loadingViews ? (
+              <div className="text-center py-8">
+                <Loader2 className="w-8 h-8 animate-spin mx-auto text-blue-600" />
+                <p className="mt-2 text-gray-600">Chargement...</p>
+              </div>
+            ) : savedViews.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">
+                <Bookmark className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                <p>Aucune vue sauvegardée</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {savedViews.map((view) => (
+                  <div
+                    key={view.view_id}
+                    className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition-colors"
+                  >
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1">
+                        <h4 className="font-semibold text-lg">{view.name}</h4>
+                        {view.description && (
+                          <p className="text-sm text-gray-600 mt-1">{view.description}</p>
+                        )}
+                        <div className="mt-2 text-xs text-gray-500">
+                          <p>
+                            Créée le :{' '}
+                            {view.created_at
+                              ? new Date(view.created_at).toLocaleDateString('fr-FR')
+                              : 'Date inconnue'}
+                          </p>
+                          <p>Filtres : {view.filters?.length || 0}</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex gap-2 ml-4">
+                        <button
+                          onClick={() => loadSavedView(view.view_id)}
+                          className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors"
+                          title="Charger cette vue"
+                        >
+                          <Play className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => shareView(view.view_id)}
+                          className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-sm rounded-lg transition-colors"
+                          title="Partager"
+                        >
+                          {copiedLink === view.view_id ? (
+                            <BookmarkCheck className="w-4 h-4" />
+                          ) : (
+                            <Copy className="w-4 h-4" />
+                          )}
+                        </button>
+                        <button
+                          onClick={() => deleteView(view.view_id)}
+                          className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white text-sm rounded-lg transition-colors"
+                          title="Supprimer"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      
       {/* Footer */}
-  <footer className="bg-gradient-to-r from-cyan-500 to-blue-600 py-12 mt-12">
-    <div className="max-w-7xl mx-auto px-6">
-      <div className="text-center">
-        <div className="flex items-center justify-center space-x-3 mb-4">
-          <Activity className="w-8 h-8 text-white" />
-          <h3 className="text-2xl font-bold text-white">LabLens</h3>
+      <footer className="bg-gradient-to-r from-cyan-500 to-blue-600 py-12 mt-12">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="text-center">
+            <div className="flex items-center justify-center space-x-3 mb-4">
+              <Activity className="w-8 h-8 text-white" />
+              <h3 className="text-2xl font-bold text-white">LabLens</h3>
+            </div>
+            <p className="text-white/90 mb-6">
+              IDSCC 5 — Artificial Intelligence, ENSAO
+            </p>
+            <p className="text-white/90 mb-2">
+              Prof. Abdelmounaim Kerkri
+            </p>
+            <p className="text-white/90 mb-6">
+              National School of Applied Sciences (ENSAO), Mohammed First University
+            </p>
+            <div className="flex items-center justify-center space-x-6 text-sm text-white/80">
+              <span>Farah</span>
+              <span>•</span>
+              <span>Zineb</span>
+              <span>•</span>
+              <span>Oumaima</span>
+              <span>•</span>
+              <span>Toufali</span>
+              <span>•</span>
+              <span>Qritel</span>
+              <span>•</span>
+              <span>Salima</span>
+            </div>
+            <div className="mt-6 pt-6 border-t border-white/20">
+              <p className="text-white/70 text-sm">
+                © 2025 LabLens. Tous droits réservés.
+              </p>
+            </div>
+          </div>
         </div>
-        <p className="text-white/90 mb-6">
-          IDSCC 5 — Artificial Intelligence, ENSAO
-        </p>
-        <p className="text-white/90 mb-2">
-          Prof. Abdelmounaim Kerkri
-        </p>
-        <p className="text-white/90 mb-6">
-          National School of Applied Sciences (ENSAO), Mohammed First University
-        </p>
-        <div className="flex items-center justify-center space-x-6 text-sm text-white/80">
-          <span>Farah</span>
-          <span>•</span>
-          <span>Zineb</span>
-          <span>•</span>
-          <span>Oumaima</span>
-          <span>•</span>
-          <span>Toufali</span>
-          <span>•</span>
-          <span>Qritel</span>
-          <span>•</span>
-          <span>Salima</span>
-        </div>
-        <div className="mt-6 pt-6 border-t border-white/20">
-          <p className="text-white/70 text-sm">
-            © 2025 LabLens. Tous droits réservés.
-          </p>
-        </div>
-      </div>
-    </div>
-  </footer>
+      </footer>
     </div>
   );
 }

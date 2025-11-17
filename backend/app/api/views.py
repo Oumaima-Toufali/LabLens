@@ -13,6 +13,36 @@ from ..db.models import View, File, Result
 router = APIRouter()
 
 
+def ensure_views_table_exists():
+    """
+    Vérifie que la table views existe et la crée si nécessaire
+    Cette fonction doit être appelée avant toute opération sur la table views
+    """
+    from sqlalchemy import inspect, text
+    from ..db.base import engine
+    
+    inspector = inspect(engine)
+    existing_tables = inspector.get_table_names()
+    
+    if 'views' not in existing_tables:
+        # Créer la table views avec SQL direct (plus fiable pour DuckDB)
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS views (
+                    view_id VARCHAR(100) PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    file_id VARCHAR(100) NOT NULL,
+                    filters TEXT NOT NULL,
+                    description TEXT,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_view_id ON views(view_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_file_id ON views(file_id)"))
+            conn.commit()
+
+
 class FilterCondition(BaseModel):
     column: str
     operator: str
@@ -38,6 +68,9 @@ async def create_view(request: CreateViewRequest, session: Session = Depends(get
     Créer une nouvelle vue (cohort) sauvegardée
     """
     try:
+        # Vérifier et créer la table views si elle n'existe pas
+        ensure_views_table_exists()
+        
         # Vérifier que le fichier existe
         file_stmt = select(File).where(File.file_id == request.file_id)
         file_record = session.exec(file_stmt).first()
@@ -72,6 +105,9 @@ async def list_views(file_id: Optional[str] = None, session: Session = Depends(g
     Lister toutes les vues sauvegardées (optionnellement filtrées par file_id)
     """
     try:
+        # Vérifier et créer la table views si elle n'existe pas
+        ensure_views_table_exists()
+        
         # Construire la requête
         if file_id:
             views_stmt = select(View).where(View.file_id == file_id).order_by(View.created_at.desc())
@@ -110,6 +146,9 @@ async def get_view(view_id: str, session: Session = Depends(get_session)):
     Obtenir les détails d'une vue spécifique
     """
     try:
+        # Vérifier et créer la table views si elle n'existe pas
+        ensure_views_table_exists()
+        
         view_stmt = select(View).where(View.view_id == view_id)
         view = session.exec(view_stmt).first()
         
@@ -135,6 +174,9 @@ async def get_view(view_id: str, session: Session = Depends(get_session)):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        print(f"❌ Erreur dans get_view: {str(e)}")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -144,6 +186,9 @@ async def update_view(view_id: str, request: UpdateViewRequest, session: Session
     Mettre à jour une vue existante
     """
     try:
+        # Vérifier et créer la table views si elle n'existe pas
+        ensure_views_table_exists()
+        
         # Vérifier que la vue existe
         view_stmt = select(View).where(View.view_id == view_id)
         view = session.exec(view_stmt).first()
@@ -185,6 +230,9 @@ async def delete_view(view_id: str, session: Session = Depends(get_session)):
     Supprimer une vue
     """
     try:
+        # Vérifier et créer la table views si elle n'existe pas
+        ensure_views_table_exists()
+        
         # Vérifier que la vue existe
         view_stmt = select(View).where(View.view_id == view_id)
         view = session.exec(view_stmt).first()
@@ -205,6 +253,9 @@ async def delete_view(view_id: str, session: Session = Depends(get_session)):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        print(f"❌ Erreur dans delete_view: {str(e)}")
+        print(traceback.format_exc())
         session.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -215,6 +266,9 @@ async def apply_view(view_id: str, session: Session = Depends(get_session)):
     Appliquer une vue sauvegardée et retourner les données filtrées
     """
     try:
+        # Vérifier et créer la table views si elle n'existe pas
+        ensure_views_table_exists()
+        
         # Récupérer la vue
         view_stmt = select(View).where(View.view_id == view_id)
         view = session.exec(view_stmt).first()
@@ -321,6 +375,9 @@ async def get_shareable_link(view_id: str, session: Session = Depends(get_sessio
     Générer un lien partageable pour une vue
     """
     try:
+        # Vérifier et créer la table views si elle n'existe pas
+        ensure_views_table_exists()
+        
         # Vérifier que la vue existe
         view_stmt = select(View).where(View.view_id == view_id)
         view = session.exec(view_stmt).first()
@@ -328,7 +385,8 @@ async def get_shareable_link(view_id: str, session: Session = Depends(get_sessio
             raise HTTPException(status_code=404, detail="Vue non trouvée")
         
         # Générer le lien (à adapter selon votre domaine)
-        share_link = f"http://localhost:3000/explorer?view_id={view_id}"
+        # On inclut aussi le file_id pour que la page puisse charger directement le bon fichier
+        share_link = f"http://localhost:3000/explorer?file_id={view.file_id}&view_id={view_id}"
         
         return {
             "success": True,
@@ -340,4 +398,7 @@ async def get_shareable_link(view_id: str, session: Session = Depends(get_sessio
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        print(f"❌ Erreur dans get_shareable_link: {str(e)}")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))

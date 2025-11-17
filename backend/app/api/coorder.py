@@ -1,8 +1,8 @@
 # backend/app/api/coorder.py
 from fastapi import APIRouter, HTTPException, Depends
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import pandas as pd
-from sqlmodel import Session, select
+from sqlmodel import Session, select, and_
 
 from ..db.base import get_session
 from ..db.models import Result, File
@@ -69,22 +69,92 @@ async def analyze_coorder(file_id: str, top_n: int = 50, session: Session = Depe
 
 
 @router.get("/coorder/{file_id}/matrix")
-async def get_coorder_matrix(file_id: str, tests: str = None, session: Session = Depends(get_session)):
+async def get_coorder_matrix(
+    file_id: str, 
+    tests: Optional[str] = None,
+    filters: Optional[str] = None,  # JSON string of filters
+    session: Session = Depends(get_session)
+):
     """
     Obtenir une matrice de co-occurrence pour visualisation (heatmap)
     
     Args:
         tests: Liste de tests séparés par des virgules (optionnel)
+        filters: JSON string représentant une liste de FilterCondition (optionnel)
     """
     try:
+        import json
+        
         # Vérifier que le fichier existe
         file_stmt = select(File).where(File.file_id == file_id)
         file_record = session.exec(file_stmt).first()
         if not file_record:
             raise HTTPException(status_code=404, detail="Fichier non trouvé")
         
-        # Charger les données avec SQLModel
+        # Construire la requête de base
         results_stmt = select(Result).where(Result.file_id == file_id)
+        
+        # Appliquer les filtres si fournis
+        if filters:
+            try:
+                filter_list = json.loads(filters)
+                filter_conditions = []
+                
+                for filter_cond in filter_list:
+                    if not filter_cond.get('value'):
+                        continue
+                    
+                    column_name = filter_cond['column']
+                    operator = filter_cond['operator']
+                    value = filter_cond['value']
+                    
+                    column_attr = getattr(Result, column_name, None)
+                    if column_attr is None:
+                        continue
+                    
+                    # Construire la condition selon l'opérateur (même logique que subset_manual)
+                    if operator == 'LIKE':
+                        filter_conditions.append(column_attr.like(f"%{value}%"))
+                    elif operator == 'IN':
+                        values_list = [v.strip() for v in value.split(',')]
+                        filter_conditions.append(column_attr.in_(values_list))
+                    elif operator == '=':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr == int(value))
+                        else:
+                            filter_conditions.append(column_attr == value)
+                    elif operator == '!=':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr != int(value))
+                        else:
+                            filter_conditions.append(column_attr != value)
+                    elif operator == '>':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr > int(value))
+                        else:
+                            filter_conditions.append(column_attr > value)
+                    elif operator == '<':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr < int(value))
+                        else:
+                            filter_conditions.append(column_attr < value)
+                    elif operator == '>=':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr >= int(value))
+                        else:
+                            filter_conditions.append(column_attr >= value)
+                    elif operator == '<=':
+                        if column_name == 'edad':
+                            filter_conditions.append(column_attr <= int(value))
+                        else:
+                            filter_conditions.append(column_attr <= value)
+                
+                if filter_conditions:
+                    results_stmt = results_stmt.where(and_(*filter_conditions))
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Format de filtres invalide (JSON attendu)")
+        
+        # Exécuter la requête
         results = session.exec(results_stmt).all()
         
         if not results:

@@ -28,8 +28,29 @@ def init_db():
     # Importer tous les modèles pour que SQLModel les enregistre
     from .models import Result, File, View
     
-    # Créer toutes les tables
-    SQLModel.metadata.create_all(engine)
+    # Créer toutes les tables (checkfirst=True par défaut, crée seulement si n'existent pas)
+    SQLModel.metadata.create_all(engine, checkfirst=True)
+    
+    # Vérifier explicitement que toutes les tables existent
+    from sqlalchemy import inspect
+    inspector = inspect(engine)
+    existing_tables = inspector.get_table_names()
+    
+    required_tables = ['results', 'files', 'views']
+    missing_tables = [t for t in required_tables if t not in existing_tables]
+    
+    if missing_tables:
+        print(f"⚠️ Tables manquantes détectées: {missing_tables}")
+        # Forcer la création des tables manquantes
+        for table_name in missing_tables:
+            if table_name == 'views':
+                View.__table__.create(engine, checkfirst=True)
+            elif table_name == 'files':
+                File.__table__.create(engine, checkfirst=True)
+            elif table_name == 'results':
+                Result.__table__.create(engine, checkfirst=True)
+        print(f"✅ Tables manquantes créées: {missing_tables}")
+    
     print("✅ Tables créées avec succès")
 
 
