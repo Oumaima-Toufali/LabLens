@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # LabLens — Interactive Blood-Work Explorer
 
 <div align="center">
