@@ -4,7 +4,7 @@ import Link from 'next/link';
 import {
   Activity, Send, Loader2, Sparkles, Database, FileText,
   TrendingUp, Users, Copy, Check, RotateCcw, MessageSquare,
-  Brain, Code, AlertCircle, Lightbulb
+  Brain, Code, AlertCircle, Lightbulb, Edit3
 } from 'lucide-react';
 
 interface Message {
@@ -30,6 +30,15 @@ export default function AssistantPage() {
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const handleEditMessage = (message: Message) => {
+    if (message.role !== 'user') return;
+    setInputMessage(message.content);
+    // Focus sur l'input pour que l'utilisateur modifie directement
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 0);
+  };
 
   // Exemples de requêtes
   const exampleQueries = [
@@ -261,6 +270,15 @@ export default function AssistantPage() {
                         <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-pink-600 rounded-full flex items-center justify-center">
                           <Users className="w-5 h-5 text-white" />
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => handleEditMessage(message)}
+                          className="ml-2 inline-flex items-center space-x-1 text-xs text-gray-400 hover:text-cyan-600 transition-colors"
+                          title="Éditer ce message"
+                        >
+                          <Edit3 className="w-3 h-3" />
+                          <span>Éditer</span>
+                        </button>
                       </>
                     )}
                     {message.role === 'system' && (
