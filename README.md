@@ -447,15 +447,9 @@ This project is developed as part of the IDSCC 5 course at the National School o
 
 ---
 
-## 📞 Contact
-
-For questions or support regarding this project, please contact the course instructor or refer to the project documentation.
-
----
-
 <div align="center">
 
-**Made with ❤️ for IDSCC 5 — Artificial Intelligence, ENSAO**
+**Made with ❤️ by Toufali Oumaima — IDSCC , ENSAO**
 
 </div>
 
