@@ -136,6 +136,22 @@ LabLens is an interactive web application designed to load, explore, and analyze
 │       │ │  Cache  │
 └───────┘ └─────────┘
 ```
+## 🖼️ Interface Preview
+
+### 🏠 Accueil
+<p align="center">
+  <img src="accueil.png" width="700" alt="Accueil Page" />
+</p>
+
+### 📊 Dashboard
+<p align="center">
+  <img src="dashboard.png" width="700" alt="Dashboard" />
+</p>
+
+### 🤖 Assistant IA
+<p align="center">
+  <img src="assistant.png" width="700" alt="LLM Assistant" />
+</p>
 
 ---
 
